@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>MathAI — Doubt Solver</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <!-- KaTeX for math rendering -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+  <!-- mathjs for client-side verification -->
+  <script src="https://cdn.jsdelivr.net/npm/mathjs@11.8.0/lib/browser/math.js"></script>
 <style>
   :root {
     --bg: #0e0e12;
@@ -600,6 +605,23 @@
   let topicCounts = {};
   let history = [];
 
+  // --- Persistence: load saved stats/history from localStorage ---
+  const saved = JSON.parse(localStorage.getItem('mathai_state') || 'null');
+  if (saved) {
+    solvedCount = saved.solvedCount || solvedCount;
+    topicCounts = saved.topicCounts || topicCounts;
+    history = saved.history || history;
+    document.getElementById('s-solved').textContent = solvedCount;
+    document.getElementById('s-topics').textContent = Object.keys(topicCounts).length;
+    document.getElementById('streak').textContent = solvedCount + ' solved';
+    renderProgress();
+    renderHistory();
+  }
+
+  function persistState(){
+    localStorage.setItem('mathai_state', JSON.stringify({ solvedCount, topicCounts, history }));
+  }
+
   // Frontend no longer holds API keys. Requests are proxied to the server at /solve.
 
   document.querySelectorAll('.chip').forEach(chip => {
@@ -662,6 +684,27 @@
         throw new Error("Invalid AI response format");
       }
 
+      // Use validation info from server if provided
+      const validation = data._validation || null;
+          // If server did not provide validation, run a lightweight client-side check
+          const clientValidation = (function(){
+            try {
+              const reported = p.answer;
+              const reportedNum = Number(String(reported).replace(/[^0-9eE.+-]/g,''));
+              let calc = p.calculation || document.getElementById('q').value || '';
+              calc = String(calc).trim();
+              if (!calc) return null;
+              // convert sin90 -> sin(90 deg)
+              calc = calc.replace(/\b(sin|cos|tan)\s*\(?\s*([0-9.]+)\s*\)?/gi, (m, fn, num) => `${fn}(${num} deg)`);
+              const expected = math.evaluate(calc);
+              const expectedNum = Number(String(expected).replace(/[^0-9eE.+-]/g,''));
+              if (!isFinite(expectedNum) || !isFinite(reportedNum)) return null;
+              const diff = Math.abs(expectedNum - reportedNum);
+              return { valid: diff < 1e-6, expected: expectedNum, reported: reportedNum, diff };
+            } catch(e){ return null; }
+          })();
+          const effectiveValidation = validation || clientValidation || null;
+
       if (!p.steps || !Array.isArray(p.steps)) {
         throw new Error("Invalid steps data");
       }
@@ -709,11 +752,49 @@
         <div class="answer-value">${p.answer}</div>
       </div>`;
 
+      // action buttons
+      html += `<div style="margin-top:10px;display:flex;gap:8px;"><button id="copy-answer" class="solve-btn" style="padding:8px 12px;font-size:13px;">Copy Answer</button><button id="share-link" class="solve-btn" style="padding:8px 12px;font-size:13px;background:var(--surface2);color:var(--text2);">Share</button></div>`;
+
       if (p.tip) {
         html += `<div class="tip-box">💡 ${p.tip}</div>`;
       }
 
-      area.innerHTML = html;
+      // If validation info exists, show a small badge above the steps
+      if (effectiveValidation) {
+        let vmsg = '';
+        if (effectiveValidation.valid === true) vmsg = `<div style="margin-bottom:10px;color:var(--green);font-weight:600;">Validated ✔ (expected ${effectiveValidation.expected})</div>`;
+        else if (effectiveValidation.valid === false) vmsg = `<div style="margin-bottom:10px;color:var(--red);font-weight:600;">Validation failed — expected ${effectiveValidation.expected}, got ${effectiveValidation.reported}</div>`;
+        else vmsg = `<div style="margin-bottom:10px;color:var(--text3);">Validation: ${effectiveValidation.reason || 'unknown'}</div>`;
+        area.innerHTML = vmsg + html;
+      } else {
+        area.innerHTML = html;
+      }
+
+      // render math expressions using KaTeX (if loaded) and wire action buttons
+      setTimeout(() => {
+        document.querySelectorAll('.math-expr').forEach(el => {
+          try {
+            if (window.katex) {
+              katex.render(el.textContent, el, { throwOnError: false });
+            }
+          } catch (e) { /* ignore */ }
+        });
+
+        // add copy/share buttons behavior if present
+        const copyBtn = document.getElementById('copy-answer');
+        if (copyBtn) copyBtn.addEventListener('click', () => {
+          const val = p.answer || '';
+          navigator.clipboard?.writeText(val).then(()=>{ copyBtn.textContent='Copied'; setTimeout(()=>copyBtn.textContent='Copy Answer',1200); });
+        });
+
+        const shareBtn = document.getElementById('share-link');
+        if (shareBtn) shareBtn.addEventListener('click', () => {
+          const u = new URL(window.location.href);
+          u.searchParams.set('topic', topic);
+          u.searchParams.set('q', document.getElementById('q').value);
+          navigator.clipboard?.writeText(u.toString()).then(()=>{ shareBtn.textContent='Link Copied'; setTimeout(()=>shareBtn.textContent='Share',1200); });
+        });
+      }, 40);
 
     } catch (err) {
       const msg = err && err.message ? err.message : (typeof err === 'string' ? err : JSON.stringify(err));
@@ -762,6 +843,18 @@
     });
     activeTopic = topic;
   }
+
+  // If URL contains q/topic, prefill inputs
+  (function hydrateFromUrl(){
+    const params = new URLSearchParams(window.location.search);
+    const q = params.get('q');
+    const t = params.get('topic');
+    if (q) document.getElementById('q').value = q;
+    if (t) {
+      document.querySelectorAll('.chip').forEach(c => c.classList.toggle('active', c.dataset.t === t));
+      activeTopic = t;
+    }
+  })();
 </script>
 </body>
 </html>
